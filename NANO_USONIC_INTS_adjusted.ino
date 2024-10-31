@@ -22,31 +22,34 @@ TMC2130Stepper TMC2130 = TMC2130Stepper(EN, DIR, STEP, CS);
 
 const int N = 159;  //N - число для сброса таймера. 159+1 = 160. 160*62.5 = 10000 нс = 10 мкс.
 
-const float MM_na_oborot = 31.141592;         //Миллиметров будет пройдено за один оборот
-const float MM_na_Shag = MM_na_oborot / 400;  //Миллиметров будет пройдено за один шаг
-const float speedMMs = 150.0;                 //Скорость в мм/с
+float MM_na_oborot = 31.141592;         //Миллиметров будет пройдено за один оборот
+float MM_na_Shag = MM_na_oborot / 400.0;  //Миллиметров будет пройдено за один шаг
+float speedMMs = 4;                 //Скорость в мм/с
 
 float Freq_MOT = speedMMs / MM_na_Shag;  //шагов в секунду при данной скорости
 
-float period_MOT = 1000000 / Freq_MOT;  //Микросекунд на шаг при данной скорости
+float period_MOT = 1000000.0 / Freq_MOT;  //Микросекунд на шаг при данной скорости
 
 float MOT_ISR_Tact = (period_MOT / ((N + 1) * 0.0625)) / 2;  //Сколько тактов нужно для данной конфигурации таймера 519 мкс для 150 мм/с, значит 51,9 тактов для N = 159
-int MOT_ISR_N = round(MOT_ISR_Tact);
 
-int MOT_counter = 0;
+volatile int MOT_ISR_N = round(MOT_ISR_Tact); //ОКРУГЛЁННОЕ ЗНАЧЕНИЕ ШАГОВ ДЛЯ ЗАПИСИ В РЕГИСТР
+
+volatile int MOT_counter = 0; //СЧЁТЧИК ДЛЯ ОТСЛЕЖИВАНИЯ СМЕНЫ СИГНАЛА С 1 на 0
 
 
 
 
-bool en = 1;
+bool en = 1; //ОТКЛЮЧЕНИЕ ЛОГИКИ ДРАЙВЕРА
 int microsteps = 256;
 
-long counterSteps = 0;  //Реальное количество сделанных шагов
+volatile long counterSteps = 0;  //Реальное количество сделанных шагов
 int direction = 0;      //Направление
-int controlPos = 0;     //Необходимое количество сделанных шагов
-int MAXSteps = 1053;
-int MINSteps = 0;
-int delta = 0;
+int controlPos = 0;     //Необходимая позиция в мм. Пропорциональна количеству шагов
+int controlStepPos = 0; //Необходимая позиция в шагах, зависящая от позиции в миллиметрах
+
+int MAXSteps = 2000;//ОГРАНИЧИТЕЛЬ ШАГОВ
+int MINSteps = 0; //НИЖНИЙ ОГРАНИЧИТЕЛЬ ШАГОВ
+int delta = 0; //ОТСТУП ДЛЯ КАЛИБРОВКИ
 
 
 volatile int32_t countrising = 0, counterfalling = 0;
@@ -60,7 +63,7 @@ volatile int32_t count = 0, count2 = 0;
 uint16_t cnt_ovf = 0;
 
 
-uint32_t t1 = 0;
+uint32_t t1 = 0, t2 = 0;
 
 bool flag;
 
@@ -76,11 +79,8 @@ int NULLFLAG = 0;
 
 void setup() {
 
-  Serial.begin(1000000);
+  Serial.begin(115200);
   if (NULLFLAG == 0) {
-
-  
-
 
   pinMode(trig, OUTPUT);
   pinMode(echo, INPUT_PULLUP);
@@ -146,12 +146,16 @@ void loop() {
 
     dist = (float)count * coefficient;
     filtered = Filter.updateEstimate(dist);
-    controlPos = constrain((filtered + delta), 0, 82);  //Получение желаемой позиции
-
-    PrintData();
-
+    controlPos = constrain((filtered + delta), 0, 82);  //Получение желаемой позиции в мм
+    controlStepPos = controlPos/MM_na_Shag
     t1 = millis();
   }
+
+   if (millis() - t2 >= 200) {
+
+    PrintData();
+    t2 = millis();
+   }
   ///PrintData();
   //Serial.println(count);
 
@@ -169,7 +173,7 @@ void loop() {
     digitalWrite(EN, en);
     digitalWrite(DIR, direction);
 
-  } else if (counterSteps > controlPos - 4 && counterSteps < controlPos + 4) {  //Остановка, если в зоне интереса
+  } else if (counterSteps > controlPos && counterSteps < controlPos) {  //Остановка, если в зоне интереса
 
     en == 1;
     digitalWrite(EN, en);
@@ -216,20 +220,22 @@ ISR(TIMER2_COMPA_vect) {  //Прямоугольный сигнал излуча
     flagMove = !flagMove;
   }
 
-  if (en == 0 && flagMove == 1 && counterSteps < MAXSteps) {
+  if (en == 0 && flagMove == 1 && counterSteps < MAXSteps && counterSteps != controlPos) {
 
+    
     PORTD |= 0b00100000;  //PD5 Pin5 Step
-
+    
     //digitalWrite(STEP, HIGH);
-
     //flagMove = 0;
-    if (MOT_counter == MOT_ISR_N) {
+    if (MOT_counter == 0) {
+
+      //Serial.println("case");
 
       if (direction == 1) {
 
         counterSteps++;
 
-      } else {
+      } else if (direction == 0) {
 
         counterSteps--;
       }
@@ -304,13 +310,27 @@ void AISR_CHANGE() {  //Внешнее прерывание считывания
 void PrintData() {
 
   Serial.println();
-  Serial.print(dist, 3);
+  Serial.print(dist, 1);
   Serial.print(",");
 
-  Serial.print(filtered, 3);
+  Serial.print(filtered, 1);
   Serial.print(",");
-  Serial.print(NULLFLAG, 3);
+  // Serial.print(NULLFLAG, 3);
+  // Serial.print(",");
+  Serial.print(controlPos);
   Serial.print(",");
+  Serial.print(counterSteps);
+  Serial.print(",");
+  Serial.print(direction);
+  Serial.print(",");
+
+
+  // Serial.print(MOT_ISR_N);
+  // Serial.print(",");
+  // Serial.print(MOT_ISR_N);
+  // Serial.print(",");
+  // Serial.print(MOT_counter);
+  // Serial.print(",");
 }
 
 void TRIGGER() { //Сигнал на триггер с частотой 100000/(per + 1)
