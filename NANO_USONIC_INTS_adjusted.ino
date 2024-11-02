@@ -1,7 +1,5 @@
 #include <SimpleKalmanFilter.h>
 
-
-
 #define trig 3  //6 на меге
 #define echo 2  //3 на меге
 
@@ -25,15 +23,13 @@ TMC2130Stepper driver = TMC2130Stepper(EN, DIR, STEP, CS);
 const int N = 159;  //N - число для сброса таймера. 159+1 = 160. 160*62.5 = 10000 нс = 10 мкс.
 
 float MM_na_oborot = 31.141592;         //Миллиметров будет пройдено за один оборот
-int microsteps = 16;
+int microsteps = 64;
 
 float MM_na_Shag = MM_na_oborot / (200*microsteps);  //Миллиметров будет пройдено за один шаг
-float speedMMs = 20;                 //Скорость в мм/с
+float speedMMs = 15;                 //Скорость в мм/с
 
 float Freq_MOT = speedMMs / MM_na_Shag;  //шагов в секунду при данной скорости
-
 float period_MOT = 1000000.0 / Freq_MOT;  //Микросекунд на шаг при данной скорости
-
 float MOT_ISR_Tact = (period_MOT / ((N + 1) * 0.0625)) / 2;  //Сколько тактов нужно для данной конфигурации таймера 519 мкс для 150 мм/с, значит 51,9 тактов для N = 159
 
 volatile int MOT_ISR_N = round(MOT_ISR_Tact); //ОКРУГЛЁННОЕ ЗНАЧЕНИЕ ШАГОВ ДЛЯ ЗАПИСИ В РЕГИСТР
@@ -43,18 +39,16 @@ volatile int MOT_ISR_N = round(MOT_ISR_Tact); //ОКРУГЛЁННОЕ ЗНАЧ�
 //volatile bool flagMove = 1;
 
 
-
-
 bool en = 1; //ОТКЛЮЧЕНИЕ ЛОГИКИ ДРАЙВЕРА
 
 
-volatile uint16_t counterSteps = 0;  //Реальное количество сделанных шагов
+volatile uint32_t counterSteps = 0;  //Реальное количество сделанных шагов
 
 int direction = 0;      //Направление
-long controlPos = 0;     //Необходимая позиция в мм. Пропорциональна количеству шагов
+float controlPos = 0;     //Необходимая позиция в мм. Пропорциональна количеству шагов
 long controlStepPos = 0; //Необходимая позиция в шагах, зависящая от позиции в миллиметрах
 
-long MAXSteps = 8899;//ОГРАНИЧИТЕЛЬ ШАГОВ
+long MAXSteps = 70000;//ОГРАНИЧИТЕЛЬ ШАГОВ
 int MINSteps = 0; //НИЖНИЙ ОГРАНИЧИТЕЛЬ ШАГОВ
 int delta = 0; //ОТСТУП ДЛЯ КАЛИБРОВКИ
 
@@ -64,7 +58,7 @@ volatile int32_t countrising = 0, counterfalling = 0;
 
 const float timicros = 0.0625;                           //Время такта в микросекундах
 const float speed = 0.343;                               //Скорость звука в мм/мкс
-const float coefficient = 8.00000000 * speed * timicros / 2.0000000;  //коеффициент умножения для получения расстояния
+const float coefficient = 8.0 * speed * timicros / 2.0;  //коеффициент умножения для получения расстояния
 
 volatile int32_t count = 0, count2 = 0;
 uint16_t cnt_ovf = 0;
@@ -86,7 +80,7 @@ int NULLFLAG = 0;
 
 void setup() {
 
-  Serial.begin(115200);
+  Serial.begin(250000);
   if (NULLFLAG == 0) {
 
   pinMode(trig, OUTPUT);
@@ -169,12 +163,18 @@ void loop() {
 
     dist = (float)count * coefficient;
     filtered = Filter.updateEstimate(dist);
-    controlPos = constrain((filtered + delta), 0, 82);  //Получение желаемой позиции в мм
+
+    if (filtered >= 82) {
+      
+      controlPos = 82;
+      
+    } else {controlPos = filtered;}
+      //Получение желаемой позиции в мм
     controlStepPos = controlPos/MM_na_Shag;
     t1 = millis();
   }
 
-   if (millis() - t2 >= 700) {
+   if (millis() - t2 >= 20) {
 
     PrintData();
     t2 = millis();
@@ -328,29 +328,21 @@ void AISR_CHANGE() {  //Внешнее прерывание считывания
 void PrintData() {
 
   Serial.println();
-  Serial.print(dist, 1);
-  Serial.print(",");
-
-  Serial.print(filtered, 1);
-  Serial.print(",");
-  // Serial.print(NULLFLAG, 3);
+  // Serial.print(dist, 1);
   // Serial.print(",");
-  Serial.print(controlPos);
-  Serial.print(",");
+
+  // Serial.print(filtered, 1);
+  // Serial.print(",");
+  // // Serial.print(NULLFLAG, 3);
+  // // Serial.print(",");
+  // Serial.print(controlPos);
+  // Serial.print(",");
   Serial.print(controlStepPos);
   Serial.print(",");
   Serial.print(counterSteps);
   Serial.print(",");
   //Serial.print(direction);
   //Serial.print(",");
-
-
-  // Serial.print(MOT_ISR_N);
-  // Serial.print(",");
-  // Serial.print(MOT_ISR_N);
-  // Serial.print(",");
-  // Serial.print(MOT_counter);
-  // Serial.print(",");
 }
 
 void TRIGGER() { //Сигнал на триггер с частотой 100000/(per + 1)
