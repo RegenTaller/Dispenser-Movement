@@ -1,5 +1,5 @@
 #include <SimpleKalmanFilter.h>
-#include "TMC2130Stepper.h"
+
 
 
 #define trig 3  //6 на меге
@@ -15,16 +15,20 @@
 #define MISO 12
 #define SCK 13
 
-#define EN 4
+#define EN 6
 
+#include "TMC2130Stepper.h"
+TMC2130Stepper driver = TMC2130Stepper(EN, DIR, STEP, CS);
 
-TMC2130Stepper TMC2130 = TMC2130Stepper(EN, DIR, STEP, CS);
+//TMC2130Stepper TMC2130 = TMC2130Stepper();
 
 const int N = 159;  //N - число для сброса таймера. 159+1 = 160. 160*62.5 = 10000 нс = 10 мкс.
 
 float MM_na_oborot = 31.141592;         //Миллиметров будет пройдено за один оборот
-float MM_na_Shag = MM_na_oborot / 400.0;  //Миллиметров будет пройдено за один шаг
-float speedMMs = 4;                 //Скорость в мм/с
+int microsteps = 16;
+
+float MM_na_Shag = MM_na_oborot / (200*microsteps);  //Миллиметров будет пройдено за один шаг
+float speedMMs = 20;                 //Скорость в мм/с
 
 float Freq_MOT = speedMMs / MM_na_Shag;  //шагов в секунду при данной скорости
 
@@ -34,20 +38,23 @@ float MOT_ISR_Tact = (period_MOT / ((N + 1) * 0.0625)) / 2;  //Сколько т
 
 volatile int MOT_ISR_N = round(MOT_ISR_Tact); //ОКРУГЛЁННОЕ ЗНАЧЕНИЕ ШАГОВ ДЛЯ ЗАПИСИ В РЕГИСТР
 
-volatile int MOT_counter = 0; //СЧЁТЧИК ДЛЯ ОТСЛЕЖИВАНИЯ СМЕНЫ СИГНАЛА С 1 на 0
+//volatile int MOT_counter = 0; //СЧЁТЧИК ДЛЯ ОТСЛЕЖИВАНИЯ СМЕНЫ СИГНАЛА С 1 на 0
+
+//volatile bool flagMove = 1;
 
 
 
 
 bool en = 1; //ОТКЛЮЧЕНИЕ ЛОГИКИ ДРАЙВЕРА
-int microsteps = 256;
 
-volatile long counterSteps = 0;  //Реальное количество сделанных шагов
+
+volatile uint16_t counterSteps = 0;  //Реальное количество сделанных шагов
+
 int direction = 0;      //Направление
-int controlPos = 0;     //Необходимая позиция в мм. Пропорциональна количеству шагов
-int controlStepPos = 0; //Необходимая позиция в шагах, зависящая от позиции в миллиметрах
+long controlPos = 0;     //Необходимая позиция в мм. Пропорциональна количеству шагов
+long controlStepPos = 0; //Необходимая позиция в шагах, зависящая от позиции в миллиметрах
 
-int MAXSteps = 2000;//ОГРАНИЧИТЕЛЬ ШАГОВ
+long MAXSteps = 8899;//ОГРАНИЧИТЕЛЬ ШАГОВ
 int MINSteps = 0; //НИЖНИЙ ОГРАНИЧИТЕЛЬ ШАГОВ
 int delta = 0; //ОТСТУП ДЛЯ КАЛИБРОВКИ
 
@@ -86,6 +93,22 @@ void setup() {
   pinMode(echo, INPUT_PULLUP);
   pinMode(STEP, OUTPUT);
   pinMode(DIR, OUTPUT);
+  pinMode(MISO, INPUT_PULLUP);
+
+  //Serial.begin(9600);
+	while(!Serial);
+	Serial.println("Start...");
+	driver.begin(); 			// Initiate pins and registeries
+	driver.rms_current(500); 	// Set stepper current to 600mA. The command is the same as command TMC2130.setCurrent(600, 0.11, 0.5);
+	driver.stealthChop(1); 	// Enable extremely quiet stepping
+  driver.microsteps(microsteps);
+	
+	digitalWrite(EN, LOW);
+
+	Serial.print("DRV_STATUS=0b");
+	Serial.println(driver.DRV_STATUS(), BIN);
+
+  Serial.println(MOT_ISR_N);
 
   //Таймер ECHO для установления длительности сигнала.
   TCCR1A = TCCR1B = TCNT1 = cnt_ovf = 0;  //5 таймер на подсчёте прерываний
@@ -147,33 +170,34 @@ void loop() {
     dist = (float)count * coefficient;
     filtered = Filter.updateEstimate(dist);
     controlPos = constrain((filtered + delta), 0, 82);  //Получение желаемой позиции в мм
-    controlStepPos = controlPos/MM_na_Shag
+    controlStepPos = controlPos/MM_na_Shag;
     t1 = millis();
   }
 
-   if (millis() - t2 >= 200) {
+   if (millis() - t2 >= 700) {
 
     PrintData();
     t2 = millis();
+
    }
   ///PrintData();
   //Serial.println(count);
 
-  if (counterSteps < controlPos && counterSteps <= MAXSteps) {  //Движение вниз
+  if (counterSteps < controlStepPos && counterSteps <= MAXSteps) {  //Движение вниз
 
     direction = 1;
     en = 0;
     digitalWrite(EN, en);
     digitalWrite(DIR, direction);
 
-  } else if (counterSteps > controlPos && counterSteps >= MINSteps) {  //Движение вверх
+  } else if (counterSteps > controlStepPos && counterSteps >= MINSteps) {  //Движение вверх
 
     direction = 0;
     en = 0;
     digitalWrite(EN, en);
     digitalWrite(DIR, direction);
 
-  } else if (counterSteps > controlPos && counterSteps < controlPos) {  //Остановка, если в зоне интереса
+  } else if (counterSteps >= controlStepPos && counterSteps <= controlStepPos) {  //Остановка, если в зоне интереса
 
     en == 1;
     digitalWrite(EN, en);
@@ -186,9 +210,13 @@ void loop() {
   // put your main code here, to run repeatedly:
 }
 
-// ISR(TIMER5_OVF_vect) {
-//   cnt_ovf++;
-// }
+//ISR(TIMER2_OVF_vect) {
+
+  //PORTD |= 0b00100000;  //PD5 Pin5 Step
+    //digitalWrite(STEP, HIGH);
+  //PORTD &= ~(1 << 5);
+
+//}
 
 // ISR(TIMER4_COMPA_vect) {  //Старая версия со скважностью 50% и очень высокой частотой на датчик
 
@@ -208,28 +236,23 @@ ISR(TIMER2_COMPA_vect) {  //Прямоугольный сигнал излуча
 
   TRIGGER();  //подача сигнала на датчик
 
-  //Serial.println(TCNT2);
-
+  static int MOT_counter;
   static bool flagMove;
-
+  
   MOT_counter++;  //Отсчёт тактов.
 
   if (MOT_counter == MOT_ISR_N) {  //Если настало время, обнуляется счётчик
 
     MOT_counter = 0;
-    flagMove = !flagMove;
+    flagMove = 1;
+
   }
 
-  if (en == 0 && flagMove == 1 && counterSteps < MAXSteps && counterSteps != controlPos) {
+  if (en == 0 && flagMove == 1 && counterSteps < MAXSteps && counterSteps != controlStepPos) {
 
-    
-    PORTD |= 0b00100000;  //PD5 Pin5 Step
-    
-    //digitalWrite(STEP, HIGH);
-    //flagMove = 0;
-    if (MOT_counter == 0) {
-
-      //Serial.println("case");
+      PORTD |= 0b00100000;  //PD5 Pin5 Step
+      PORTD &= ~(1 << 5);
+      flagMove = 0;
 
       if (direction == 1) {
 
@@ -239,16 +262,11 @@ ISR(TIMER2_COMPA_vect) {  //Прямоугольный сигнал излуча
 
         counterSteps--;
       }
-    }
 
-
-  } else if (en == 0 && flagMove == 0) {
-
-    PORTD &= ~(1 << 5);
-
-    //digitalWrite(STEP, LOW);
-    //flagMove = 1;
   }
+
+  flagMove == 0;
+
 }
 
 
@@ -319,10 +337,12 @@ void PrintData() {
   // Serial.print(",");
   Serial.print(controlPos);
   Serial.print(",");
+  Serial.print(controlStepPos);
+  Serial.print(",");
   Serial.print(counterSteps);
   Serial.print(",");
-  Serial.print(direction);
-  Serial.print(",");
+  //Serial.print(direction);
+  //Serial.print(",");
 
 
   // Serial.print(MOT_ISR_N);
