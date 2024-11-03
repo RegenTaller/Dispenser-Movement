@@ -1,4 +1,7 @@
 #include <SimpleKalmanFilter.h>
+#include <EEPROM.h>
+
+uint16_t controlSteps_Saved = 0;
 
 #define trig 3  //6 на меге
 #define echo 2  //3 на меге
@@ -15,6 +18,7 @@
 
 #define EN 6
 
+
 #include "TMC2130Stepper.h"
 TMC2130Stepper driver = TMC2130Stepper(EN, DIR, STEP, CS);
 
@@ -23,10 +27,10 @@ TMC2130Stepper driver = TMC2130Stepper(EN, DIR, STEP, CS);
 const int N = 159;  //N - число-отсчёт сброса таймера. 159+1 = 160. 160*62.5 = 10000 нс = 10 мкс.
 
 float MM_na_oborot = 31.141592;  //Миллиметров будет пройдено за один оборот
-int microsteps = 64; //количество микрошагов двигателя
+int microsteps = 64;             //количество микрошагов двигателя
 
 float MM_na_Shag = MM_na_oborot / (200 * microsteps);  //Миллиметров будет пройдено за один шаг
-float speedMMs = 15;                                   //Скорость в мм/с
+float speedMMs = 20;                                   //Скорость в мм/с
 
 float Freq_MOT = speedMMs / MM_na_Shag;                      //шагов в секунду при данной скорости
 float period_MOT = 1000000.0 / Freq_MOT;                     //Микросекунд на шаг при данной скорости
@@ -41,24 +45,23 @@ volatile int MOT_ISR_N = round(MOT_ISR_Tact);  //ОКРУГЛЁННОЕ ЗНАЧ
 bool en = 1;  //ОТКЛЮЧЕНИЕ ЛОГИКИ ДРАЙВЕРА
 
 
-volatile uint32_t counterSteps = 0;  //Реальное количество поданных импульсов/шагов, получаемое в ISR
+volatile uint16_t counterSteps = 0;  //Реальное количество поданных импульсов/шагов, получаемое в ISR
 
 int direction = 0;        //Направление
 float controlPos = 0;     //Необходимая позиция в мм. Пропорциональна количеству шагов
-long controlStepPos = 0;  //Необходимая позиция в шагах, зависящая от позиции в миллиметрах
+unsigned int controlStepPos = 0;  //Необходимая позиция в шагах, зависящая от позиции в миллиметрах
 
-long MAXSteps = 70000;  //ОГРАНИЧИТЕЛЬ ШАГОВ
+unsigned int MAXSteps = 40000;  //ОГРАНИЧИТЕЛЬ ШАГОВ
 int MINSteps = 0;       //НИЖНИЙ ОГРАНИЧИТЕЛЬ ШАГОВ
 int delta = 0;          //ОТСТУП ДЛЯ КАЛИБРОВКИ
 
 ///////////////////////////////ДФТЧИК//////////////////////////////////////////////////////////////////////
-volatile int32_t countrising = 0, counterfalling = 0;
 
 const float timicros = 0.0625;                           //Время такта в микросекундах
 const float speed = 0.343;                               //Скорость звука в мм/мкс
 const float coefficient = 8.0 * speed * timicros / 2.0;  //коеффициент умножения для получения расстояния
 
-volatile int32_t count = 0, count2 = 0;
+volatile uint16_t count = 0, count2 = 0;
 uint16_t cnt_ovf = 0;
 
 
@@ -74,80 +77,92 @@ const uint16_t per = 999;  //Период подачи сигнала на TRIG 
 
 SimpleKalmanFilter Filter(2, 1, 0.03);  //1-ый коэффициент - амплитуда разлёта показаний от реального
 float filtered = 0;
-int NULLFLAG = 0;
 
 void setup() {
 
-  Serial.begin(250000);
-  if (NULLFLAG == 0) {
-
-    pinMode(trig, OUTPUT);
-    pinMode(echo, INPUT_PULLUP);
-    pinMode(STEP, OUTPUT);
-    pinMode(DIR, OUTPUT);
-    pinMode(MISO, INPUT_PULLUP);
-
-    //Serial.begin(9600);
-    while (!Serial);
-    Serial.println("Start...");
-    driver.begin();           // Initiate pins and registeries
-    driver.rms_current(500);  // Set stepper current to 600mA. The command is the same as command TMC2130.setCurrent(600, 0.11, 0.5);
-    driver.stealthChop(1);    // Enable extremely quiet stepping
-    driver.microsteps(microsteps);
-
-    digitalWrite(EN, LOW);
-
-    Serial.print("DRV_STATUS=0b");
-    Serial.println(driver.DRV_STATUS(), BIN);
-
-    Serial.println(MOT_ISR_N);
-
-    //Таймер ECHO для установления длительности сигнала.
-    TCCR1A = TCCR1B = TCNT1 = cnt_ovf = 0;              //5 таймер на подсчёте прерываний
-    TIFR1 = (1 << TOV1);                                //обработка прерывания
-    TIMSK1 = (1 << TOIE1);                              //Включение прерывания по переполнению
-    TCCR1B |= (1 << CS12) | (1 << CS11) | (1 << CS10);  //делитель тактирования 1 16 МГЦ
-
-    // EIMSK &= ~(1 << INT0);                 //External Interrupt Mask Register - EIMSK - is for enabling INT[6;3:0] interrupts, INT0 is disabled to avoid false interrupts when mainuplating EICRA
-    // EICRA |= (1 << ISC01) | (1 << ISC00);  //External Interrupt Control Register A - EICRA - defines the interrupt edge profile, here configured to trigger on rising edge
-    // EIFR &= ~(1 << INTF0);                 //External Interrupt Flag Register - EIFR controls interrupt flags on INT[6;3:0], here it is cleared
-    // EIMSK |= (1 << INT0);                  //Enable INT0
-    //Enable global interrupts
-
-    ////////////////////////////////////////////////////////////////////////////
-
-    //Таймер TRIG Триггера и Моторов:
-    TCCR2A = 0;  // set entire TCCR4A register to 0
-    TCCR2B = 0;  // same for TCCR4B
-    TCNT2 = 0;   // initialize counter value to 0
-
-    TIFR2 = (1 << TOV2);
-    TCCR2A |= (0 << WGM20) | (1 << WGM21);
-    // turn on CTC mode
-    TCCR2B |= (0 << WGM22);  //страница 145 док. CTC mode 2560 //с 130 для 328P
-    // Set  bits for 1 prescaler
-    TCCR2B |= (0 << CS22) | (0 << CS21) | (1 << CS20);
-    // enable timer compare interrupt
-    TIMSK2 |= (1 << OCIE2A);
-
-    OCR2A = N;  //159+1 = 160; 160*62.5 = 10000 нс = 10 мкс. Вызов функции каждые 10 мкс.
-
-    /////////////////////////////////////////////////////////////////////////////////////////
-    //OCR4A = 65535;
-
-    count2 = 0;
-    attachInterrupt(digitalPinToInterrupt(echo), AISR_CHANGE_ECHO, CHANGE);
-
-    sei();
-
-    // Serial.println("Frequency: " + String(Freq_MOT));
-    // Serial.println("Period: " + String(period_MOT));
-    // Serial.println("Tacts: " + String(MOT_ISR_N));
+  Serial.begin(115200);
 
 
-    NULLFLAG++;
-    //attachInterrupt(digitalPinToInterrupt(echo), BISR_Falling, FALLING);
+  pinMode(trig, OUTPUT);
+  pinMode(echo, INPUT_PULLUP);
+  pinMode(STEP, OUTPUT);
+  pinMode(DIR, OUTPUT);
+  pinMode(MISO, INPUT_PULLUP);
+
+  //Serial.begin(9600);
+  while (!Serial)
+    ;
+  Serial.println("Start...");
+  driver.begin();           // Initiate pins and registeries
+  driver.rms_current(500);  // Set stepper current to 600mA. The command is the same as command TMC2130.setCurrent(600, 0.11, 0.5);
+  driver.stealthChop(1);    // Enable extremely quiet stepping
+  driver.microsteps(microsteps);
+
+  digitalWrite(EN, LOW);
+
+  //Serial.print("DRV_STATUS=0b");
+  //Serial.println(driver.DRV_STATUS(), BIN);
+
+  Serial.println(MOT_ISR_N);
+
+  //Таймер ECHO для установления длительности сигнала.
+  TCCR1A = TCCR1B = TCNT1 = cnt_ovf = 0;              //5 таймер на подсчёте прерываний
+  TIFR1 = (1 << TOV1);                                //обработка прерывания
+  TIMSK1 = (1 << TOIE1);                              //Включение прерывания по переполнению
+  TCCR1B |= (1 << CS12) | (1 << CS11) | (1 << CS10);  //делитель тактирования 1 16 МГЦ
+
+  // EIMSK &= ~(1 << INT0);                 //External Interrupt Mask Register - EIMSK - is for enabling INT[6;3:0] interrupts, INT0 is disabled to avoid false interrupts when mainuplating EICRA
+  // EICRA |= (1 << ISC01) | (1 << ISC00);  //External Interrupt Control Register A - EICRA - defines the interrupt edge profile, here configured to trigger on rising edge
+  // EIFR &= ~(1 << INTF0);                 //External Interrupt Flag Register - EIFR controls interrupt flags on INT[6;3:0], here it is cleared
+  // EIMSK |= (1 << INT0);                  //Enable INT0
+  //Enable global interrupts
+
+  ////////////////////////////////////////////////////////////////////////////
+
+  //Таймер TRIG Триггера и Моторов:
+  TCCR2A = 0;  // set entire TCCR4A register to 0
+  TCCR2B = 0;  // same for TCCR4B
+  TCNT2 = 0;   // initialize counter value to 0
+
+  TIFR2 = (1 << TOV2);
+  TCCR2A |= (0 << WGM20) | (1 << WGM21);
+  // turn on CTC mode
+  TCCR2B |= (0 << WGM22);  //страница 145 док. CTC mode 2560 //с 130 для 328P
+  // Set  bits for 1 prescaler
+  TCCR2B |= (0 << CS22) | (0 << CS21) | (1 << CS20);
+  // enable timer compare interrupt
+  TIMSK2 |= (1 << OCIE2A);
+
+  OCR2A = N;  //159+1 = 160; 160*62.5 = 10000 нс = 10 мкс. Вызов функции каждые 10 мкс.
+
+  /////////////////////////////////////////////////////////////////////////////////////////
+  //OCR4A = 65535;
+
+  count2 = 0;
+  attachInterrupt(digitalPinToInterrupt(echo), AISR_CHANGE_ECHO, CHANGE);
+
+  sei();
+
+  // Serial.println("Frequency: " + String(Freq_MOT));
+  // Serial.println("Period: " + String(period_MOT));
+  // Serial.println("Tacts: " + String(MOT_ISR_N));
+
+  ///EEPROM.put(0, 55.5);
+  //NULLFLAG++;
+  EEPROM.get(0, controlSteps_Saved);
+
+
+  if (controlSteps_Saved > MAXSteps) {
+
+    counterSteps = 0;
+
+  } else {
+
+    counterSteps = controlSteps_Saved;
   }
+  //EEPROM.get(0, counterSteps);
+  //attachInterrupt(digitalPinToInterrupt(echo), BISR_Falling, FALLING);
+
 
   Serial.println("Start");
 
@@ -166,11 +181,12 @@ void loop() {
       controlPos = 82;
 
     } else {
+
       controlPos = filtered;
+    
     }
     //Получение желаемой позиции в мм
     controlStepPos = controlPos / MM_na_Shag;
-    t1 = millis();
 
     if (counterSteps < controlStepPos && counterSteps <= MAXSteps) {  //Движение вниз
 
@@ -192,14 +208,21 @@ void loop() {
       digitalWrite(EN, en);
       digitalWrite(DIR, 0);
     }
+
+    t1 = millis();
+    
   }
   //en = 1;
   //digitalWrite(EN, en);
 
-  if (millis() - t2 >= 20) {
+  if (millis() - t2 >= 100) {
 
-    PrintData();
     t2 = millis();
+    //PrintData();
+    EEPROM.put(0, counterSteps);
+    PrintData();
+    
+    //EEPROM.get(0, controlSteps_Saved);
   }
   ///PrintData();
   //Serial.println(count);
@@ -327,8 +350,8 @@ void AISR_CHANGE_ECHO() {  //Внешнее прерывание считыва�
 void PrintData() {
 
   Serial.println();
-  // Serial.print(dist, 1);
-  // Serial.print(",");
+  Serial.print(dist, 1);
+  Serial.print(",");
 
   // Serial.print(filtered, 1);
   // Serial.print(",");
@@ -336,10 +359,14 @@ void PrintData() {
   // // Serial.print(",");
   // Serial.print(controlPos);
   // Serial.print(",");
+
   Serial.print(controlStepPos);
   Serial.print(",");
   Serial.print(counterSteps);
   Serial.print(",");
+
+  // Serial.println(controlSteps_Saved);
+  // Serial.print(",");
   //Serial.print(direction);
   //Serial.print(",");
 }
