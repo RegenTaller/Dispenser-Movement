@@ -1,7 +1,7 @@
 #include <SimpleKalmanFilter.h>
 #include <EEPROM.h>
 
-uint16_t controlSteps_Saved = 0;
+uint16_t controlSteps_Saved = 0;  //Сохранённая позиция моторов. Нужна для отсутствия сбития положения при отключении контроллера.
 
 #define trig 3  //6 на меге
 #define echo 2  //3 на меге
@@ -18,44 +18,40 @@ uint16_t controlSteps_Saved = 0;
 
 #define EN 6
 
+uint8_t input = 0;
 
 #include "TMC2130Stepper.h"
 TMC2130Stepper driver = TMC2130Stepper(EN, DIR, STEP, CS);
 
 //TMC2130Stepper TMC2130 = TMC2130Stepper();
 
-const int N = 159;  //N - число-отсчёт сброса таймера. 159+1 = 160. 160*62.5 = 10000 нс = 10 мкс.
+const int N = 159;  // N - число-отсчёт сброса таймера. 159+1 = 160. 160*62.5 = 10000 нс = 10 мкс.
 
-float MM_na_oborot = 31.141592;  //Миллиметров будет пройдено за один оборот
-int microsteps = 64;             //количество микрошагов двигателя
+float MM_na_oborot = 31.141592;  // Миллиметров будет пройдено за один оборот. Диаметр шестерни 10 мм.
+int microsteps = 64;             // количество микрошагов двигателя
 
-float MM_na_Shag = MM_na_oborot / (200 * microsteps);  //Миллиметров будет пройдено за один шаг
-float speedMMs = 20;                                   //Скорость в мм/с
+float MM_na_Shag = MM_na_oborot / (200 * microsteps);  // Миллиметров будет пройдено за один шаг. 200 - полных шагов двигателя на оборот
+float speedMMs = 20;                                   // Скорость в мм/с
 
-float Freq_MOT = speedMMs / MM_na_Shag;                      //шагов в секунду при данной скорости
-float period_MOT = 1000000.0 / Freq_MOT;                     //Микросекунд на шаг при данной скорости
-float MOT_ISR_Tact = (period_MOT / ((N + 1) * 0.0625)) / 2;  //Сколько тактов нужно для данной конфигурации таймера 519 мкс для 150 мм/с, значит 51,9 тактов для N = 159
+float Freq_MOT = speedMMs / MM_na_Shag;                      // Шагов в секунду при данной скорости
+float period_MOT = 1000000.0 / Freq_MOT;                     // Микросекунд на шаг при данной скорости
+float MOT_ISR_Tact = (period_MOT / ((N + 1) * 0.0625)) / 2;  // Сколько тактов нужно для данной конфигурации таймера 519 мкс для 150 мм/с, значит 51,9 тактов для N = 159
 
-volatile int MOT_ISR_N = round(MOT_ISR_Tact);  //ОКРУГЛЁННОЕ ЗНАЧЕНИЕ ШАГОВ ДЛЯ ЗАПИСИ В РЕГИСТР
-
-//volatile int MOT_counter = 0; //СЧЁТЧИК ДЛЯ ОТСЛЕЖИВАНИЯ СМЕНЫ СИГНАЛА С 1 на 0
-
-//volatile bool flagMove = 1;
+volatile int MOT_ISR_N = round(MOT_ISR_Tact);  // ОКРУГЛЁННОЕ ЗНАЧЕНИЕ ШАГОВ. Определяет скорость вращения мотора.
 
 bool en = 1;  //ОТКЛЮЧЕНИЕ ЛОГИКИ ДРАЙВЕРА
 
+volatile uint16_t counterSteps = 0;  //Реальное количество поданных импульсов/сделанных шагов, получаемое в ISR. Без учёта потерь
 
-volatile uint16_t counterSteps = 0;  //Реальное количество поданных импульсов/шагов, получаемое в ISR
-
-int direction = 0;        //Направление
-float controlPos = 0;     //Необходимая позиция в мм. Пропорциональна количеству шагов
+int direction = 0;                //Направление
+float controlPos = 0;             //Необходимая позиция в мм. Пропорциональна количеству шагов
 unsigned int controlStepPos = 0;  //Необходимая позиция в шагах, зависящая от позиции в миллиметрах
 
 unsigned int MAXSteps = 40000;  //ОГРАНИЧИТЕЛЬ ШАГОВ
-int MINSteps = 0;       //НИЖНИЙ ОГРАНИЧИТЕЛЬ ШАГОВ
-int delta = 0;          //ОТСТУП ДЛЯ КАЛИБРОВКИ
+int MINSteps = 0;               //НИЖНИЙ ОГРАНИЧИТЕЛЬ ШАГОВ
+int shift = 0;                  //ОТСТУП ДЛЯ КАЛИБРОВКИ
 
-///////////////////////////////ДФТЧИК//////////////////////////////////////////////////////////////////////
+///////////////////////////////ДАТЧИК//////////////////////////////////////////////////////////////////////
 
 const float timicros = 0.0625;                           //Время такта в микросекундах
 const float speed = 0.343;                               //Скорость звука в мм/мкс
@@ -73,15 +69,15 @@ float dist = 0;
 
 volatile uint16_t counternew = 0;
 
-const uint16_t per = 999;  //Период подачи сигнала на TRIG датчика
+const uint16_t per = 999;  //Период подачи сигнала на TRIG датчика // 1000-1
 
-SimpleKalmanFilter Filter(2, 1, 0.03);  //1-ый коэффициент - амплитуда разлёта показаний от реального
+SimpleKalmanFilter Filter(2, 1, 0.03);  //1-ый коэффициент - амплитуда разлёта показаний от реального, третий - скорость изменения показаний
 float filtered = 0;
 
 void setup() {
 
   Serial.begin(115200);
-
+  Serial.setTimeout(1);
 
   pinMode(trig, OUTPUT);
   pinMode(echo, INPUT_PULLUP);
@@ -92,21 +88,21 @@ void setup() {
   //Serial.begin(9600);
   while (!Serial)
     ;
+
+  SPI.begin();
   Serial.println("Start...");
   driver.begin();           // Initiate pins and registeries
-  driver.rms_current(500);  // Set stepper current to 600mA. The command is the same as command TMC2130.setCurrent(600, 0.11, 0.5);
+  driver.rms_current(500);  // Set stepper current to 500mA. The command is the same as command TMC2130.setCurrent(600, 0.11, 0.5);
   driver.stealthChop(1);    // Enable extremely quiet stepping
   driver.microsteps(microsteps);
 
   digitalWrite(EN, LOW);
 
-  //Serial.print("DRV_STATUS=0b");
-  //Serial.println(driver.DRV_STATUS(), BIN);
 
   Serial.println(MOT_ISR_N);
 
   //Таймер ECHO для установления длительности сигнала.
-  TCCR1A = TCCR1B = TCNT1 = cnt_ovf = 0;              //5 таймер на подсчёте прерываний
+  TCCR1A = TCCR1B = TCNT1 = cnt_ovf = 0;              //1 таймер на подсчёте прерываний
   TIFR1 = (1 << TOV1);                                //обработка прерывания
   TIMSK1 = (1 << TOIE1);                              //Включение прерывания по переполнению
   TCCR1B |= (1 << CS12) | (1 << CS11) | (1 << CS10);  //делитель тактирования 1 16 МГЦ
@@ -136,21 +132,13 @@ void setup() {
   OCR2A = N;  //159+1 = 160; 160*62.5 = 10000 нс = 10 мкс. Вызов функции каждые 10 мкс.
 
   /////////////////////////////////////////////////////////////////////////////////////////
-  //OCR4A = 65535;
 
   count2 = 0;
   attachInterrupt(digitalPinToInterrupt(echo), AISR_CHANGE_ECHO, CHANGE);
 
   sei();
 
-  // Serial.println("Frequency: " + String(Freq_MOT));
-  // Serial.println("Period: " + String(period_MOT));
-  // Serial.println("Tacts: " + String(MOT_ISR_N));
-
-  ///EEPROM.put(0, 55.5);
-  //NULLFLAG++;
-  EEPROM.get(0, controlSteps_Saved);
-
+  EEPROM.get(0, controlSteps_Saved);  //Получение, записанного перед выключением, положения мотора
 
   if (controlSteps_Saved > MAXSteps) {
 
@@ -160,13 +148,8 @@ void setup() {
 
     counterSteps = controlSteps_Saved;
   }
-  //EEPROM.get(0, counterSteps);
-  //attachInterrupt(digitalPinToInterrupt(echo), BISR_Falling, FALLING);
-
 
   Serial.println("Start");
-
-  // put your setup code here, to run once:
 }
 
 void loop() {
@@ -174,19 +157,18 @@ void loop() {
   if (millis() - t1 >= 10) {
 
     dist = (float)count * coefficient;
-    filtered = Filter.updateEstimate(dist);
+    filtered = Filter.updateEstimate(dist);  //Фильтрация значения дистанции
 
-    if (filtered >= 82) {
+    if (filtered >= 82) {  //Ограничение максимальной дистанции
 
-      controlPos = 82;
+      controlPos = 82 - shift;
 
     } else {
 
-      controlPos = filtered;
-    
+      controlPos = filtered - shift;
     }
-    //Получение желаемой позиции в мм
-    controlStepPos = controlPos / MM_na_Shag;
+
+    controlStepPos = controlPos / MM_na_Shag;  //Получение желаемой позиции в шагах
 
     if (counterSteps < controlStepPos && counterSteps <= MAXSteps) {  //Движение вниз
 
@@ -202,7 +184,7 @@ void loop() {
       digitalWrite(EN, en);
       digitalWrite(DIR, direction);
 
-    } else if (counterSteps >= controlStepPos && counterSteps <= controlStepPos) {  //Остановка, если в зоне интереса
+    } else if (counterSteps >= controlStepPos && counterSteps <= controlStepPos) {  //Остановка, если в зоне равновесия
 
       en == 1;
       digitalWrite(EN, en);
@@ -210,29 +192,19 @@ void loop() {
     }
 
     t1 = millis();
-    
   }
-  //en = 1;
-  //digitalWrite(EN, en);
+
+  inputData();
 
   if (millis() - t2 >= 100) {
 
     t2 = millis();
     //PrintData();
-    EEPROM.put(0, counterSteps);
+    EEPROM.put(0, counterSteps);  //Обновление сохранённого значения позиции моторов
     PrintData();
-    
+
     //EEPROM.get(0, controlSteps_Saved);
   }
-  ///PrintData();
-  //Serial.println(count);
-
-
-  // PORTH |= 0b00001000;  // PH3 pin 6
-  // delayMicroseconds(10);
-  // PORTH &= ~(1 << 3);
-  // delayMicroseconds(10);
-  // put your main code here, to run repeatedly:
 }
 
 //ISR(TIMER2_OVF_vect) {
@@ -243,7 +215,7 @@ void loop() {
 
 //}
 
-// ISR(TIMER4_COMPA_vect) {  //Старая версия со скважностью 50% и очень высокой частотой на датчик
+// ISR(TIMER4_COMPA_vect) {  //Старая версия со скважностью 50% ивысокой частотой подачи сигнала на датчик
 
 //   if (flag == 1) {
 
@@ -298,25 +270,16 @@ void AISR_CHANGE_ECHO() {  //Внешнее прерывание считыва�
 
   if (!(PIND & 0b00000100) == 0) {
 
-    // TIFR5 = (1 << TOV5);    //обработка прерывания
-    // TIMSK5 = (1 << TOIE5);  //Включение прерывания по переполнению
-    //cnt_ovf = 0;
     TCCR1A = TCCR1B = 0;                                //Обнуление таймеров и их отключение
     TCCR1B |= (0 << CS12) | (1 << CS11) | (0 << CS10);  //делитель тактирования 1 16 МГЦ 4 мс переполнение делитель 2, на 8, 32 мс переполнение. Запуск таймеров
     //flag = 1;
     TCNT1 = 0x0000;  // Обнуление счётчика
-    //countrising = micros();
 
   } else if (!(PIND & 0b00000100) == 1) {
 
     count = TCNT1;  //Запись значения счётчика
 
     TCCR1A = TCCR1B = 0;  //Обнуление счётчика и выключение таймеров
-
-    //counterfalling = micros() - countrising;
-
-    //flag = 0;
-    //count = TCNT5;
   }
 }
 
@@ -350,13 +313,13 @@ void AISR_CHANGE_ECHO() {  //Внешнее прерывание считыва�
 void PrintData() {
 
   Serial.println();
-  Serial.print(dist, 1);
-  Serial.print(",");
-
-  // Serial.print(filtered, 1);
+  // Serial.print(dist, 1);
   // Serial.print(",");
-  // // Serial.print(NULLFLAG, 3);
-  // // Serial.print(",");
+
+  Serial.print(filtered, 1);
+  Serial.print(",");
+  // Serial.print(NULLFLAG, 3);
+  // Serial.print(",");
   // Serial.print(controlPos);
   // Serial.print(",");
 
@@ -390,5 +353,75 @@ void TRIGGER() {  //Сигнал на триггер с частотой 100000/
   counternew++;
 }
 
-void MOTOR() {
+void inputData() {
+
+  if (Serial.available() > 0) {  //если есть доступные данные
+
+    char buffer[] = { "" };
+    String dannie = "";
+
+    while (Serial.available()) {
+
+      if (Serial.readBytesUntil(10, buffer, 1)) {
+        //Serial.print("I received: ");
+        //Serial.println(buffer[0]);
+        dannie = dannie + buffer[0];
+      }
+    }
+
+    dannie.trim();
+    Serial.println(dannie);
+
+    if (dannie.indexOf("sp") != -1) {
+
+      uint8_t sppos = dannie.indexOf("sp") + 2;
+      String speedrec = dannie.substring(sppos, sppos + 3);
+      int receivedspeed = constrain(speedrec.toInt(), 1, 100);
+      Serial.println("received speed: ");
+      Serial.println(receivedspeed);
+
+      recalculation(1, receivedspeed);
+    }
+
+    if (dannie.indexOf("sh") != -1) {
+
+      uint8_t shpos = dannie.indexOf("sh") + 2;
+      String Shiftrec = dannie.substring(shpos, shpos + 2);
+      //Serial.println(Shiftrec);
+      int receivedshift = constrain(Shiftrec.toInt(), 0, 82);
+      Serial.println("received shift: ");
+      Serial.println(receivedshift);
+
+      recalculation(2, receivedshift);
+
+    }
+
+    
+
+    
+    //Serial.println(dannie);
+  }
+}
+
+void recalculation(int opID, float val) {
+
+  switch (opID) {
+
+    case 1:
+
+      Freq_MOT = val / MM_na_Shag;                      // Шагов в секунду при данной скорости
+      period_MOT = 1000000.0 / Freq_MOT;                     // Микросекунд на шаг при данной скорости
+      MOT_ISR_Tact = (period_MOT / ((N + 1) * 0.0625)) / 2;  // Сколько тактов нужно для данной конфигурации таймера 519 мкс для 150 мм/с, значит 51,9 тактов для N = 159
+
+      MOT_ISR_N = round(MOT_ISR_Tact);  // ОКРУГЛЁННОЕ ЗНАЧЕНИЕ ШАГОВ. Определяет скорость вращения мотора.
+
+      break;
+
+    case 2:
+
+      shift = val;
+
+      break;
+  }
+
 }
