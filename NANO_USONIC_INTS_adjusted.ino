@@ -79,7 +79,7 @@ bool PrintDataFlag = 1;
 void setup() {
 
   Serial.begin(115200);
-  Serial.setTimeout(1);
+  Serial.setTimeout(200);
 
   pinMode(trig, OUTPUT);
   pinMode(echo, INPUT_PULLUP);
@@ -362,7 +362,7 @@ void TRIGGER() {  //Сигнал на триггер с частотой 100000/
 void inputData() {
 
   if (Serial.available() > 0) {  //если есть доступные данные
-    
+
     //Serial.println("Serial.available()");
     char buffer[] = { "" };
     String dannie = "";
@@ -370,15 +370,21 @@ void inputData() {
 
     while (Serial.available()) {
 
-      if (Serial.readBytes(buffer, 1)) {
-        //Serial.print("I received: ");
-        //Serial.println(buffer[0]);
-        dannie = dannie + buffer[0];
+      while (Serial.available()) {
+
+        dannie = dannie + Serial.readString();
       }
-      // j++;
-      // Serial.print(j);
-      // Serial.print(" :  ");
-      //Serial.println(buffer[0]);
+
+
+      //   if (Serial.readBytes(buffer, 1)) {
+      //     //Serial.print("I received: ");
+      //     //Serial.println(buffer[0]);
+      //     dannie = dannie + buffer[0];
+      //   }
+      //   // j++;
+      //   // Serial.print(j);
+      //   // Serial.print(" :  ");
+      //   //Serial.println(buffer[0]);
     }
 
     dannie.trim();
@@ -398,14 +404,61 @@ void inputData() {
 
       uint8_t shpos = dannie.indexOf("sh") + 2;
       String Shiftrec = dannie.substring(shpos, shpos + 2);
-      //Serial.println(Shiftrec);
       int receivedshift = constrain(Shiftrec.toInt(), 0, 82);
       Serial.println("received shift: " + String(receivedshift));
       recalculation(2, receivedshift);
     }
 
+    volatile long bauds[] = {1200, 2400, 4800, 9600, 19200, 31250, 38400, 57600, 74880, 115200, 230400, 250000, 460800, 500000};
+
+    if (dannie.indexOf("COM") != -1) {
+
+      bool supported = false;
+
+      uint8_t COMBaudpos = dannie.indexOf("COM") + 3;
+      PrintDataFlag = 0;
+      Serial.println("/////Stop Data sending/////");
+      long rec = dannie.substring(COMBaudpos).toInt();
+      Serial.println("COM baud REC: " + String(rec));
+      long NewBaud = constrain(rec, 1200, 500000);
+
+      for (int i = 0; i < sizeof(bauds)/4; i++) {
+        Serial.println(bauds[i]);
+        if (bauds[i] == NewBaud) {
+
+          supported = true;
+          Serial.println("Supported baud: " + String(bauds[i]));
+          break;
+
+        }else {supported = false;}
+
+      }
+
+      if (supported == false) {
+        
+        Serial.println("Invalid/Insupported baud");
+        Serial.println("NewBaud Is: " + String(NewBaud));
+        NewBaud = 115200;
+        
+      }
+
+      Serial.println("NEW BAUD: " + String(NewBaud));
+
+      if (NewBaud >= 300) {
+
+        Serial.end();
+        delay(1500);
+        
+        Serial.begin(NewBaud);
+        delay(1000);
+        Serial.println("Successfully applied baud: " + String(NewBaud));
+      }
+
+    }
+
     if (dannie.indexOf("PD") != -1) {
 
+      Serial.println("PD");
       PrintDataFlag = !PrintDataFlag;
 
       if (PrintDataFlag == 1) {
