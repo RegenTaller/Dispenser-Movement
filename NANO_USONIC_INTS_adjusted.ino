@@ -74,6 +74,8 @@ const uint16_t per = 999;  //Период подачи сигнала на TRIG 
 SimpleKalmanFilter Filter(2, 1, 0.03);  //1-ый коэффициент - амплитуда разлёта показаний от реального, третий - скорость изменения показаний
 float filtered = 0;
 
+bool PrintDataFlag = 1;
+
 void setup() {
 
   Serial.begin(115200);
@@ -90,7 +92,7 @@ void setup() {
     ;
 
   SPI.begin();
-  Serial.println("Start...");
+  //Serial.println("Start...");
   driver.begin();           // Initiate pins and registeries
   driver.rms_current(500);  // Set stepper current to 500mA. The command is the same as command TMC2130.setCurrent(600, 0.11, 0.5);
   driver.stealthChop(1);    // Enable extremely quiet stepping
@@ -195,13 +197,17 @@ void loop() {
   }
 
   inputData();
-
   if (millis() - t2 >= 100) {
 
     t2 = millis();
-    //PrintData();
+
+    if (PrintDataFlag == 1) {
+
+      PrintData();
+    }
+
     EEPROM.put(0, counterSteps);  //Обновление сохранённого значения позиции моторов
-    PrintData();
+    //PrintData();
 
     //EEPROM.get(0, controlSteps_Saved);
   }
@@ -356,20 +362,27 @@ void TRIGGER() {  //Сигнал на триггер с частотой 100000/
 void inputData() {
 
   if (Serial.available() > 0) {  //если есть доступные данные
-
+    
+    //Serial.println("Serial.available()");
     char buffer[] = { "" };
     String dannie = "";
+    int j = 0;
 
     while (Serial.available()) {
 
-      if (Serial.readBytesUntil(10, buffer, 1)) {
+      if (Serial.readBytes(buffer, 1)) {
         //Serial.print("I received: ");
         //Serial.println(buffer[0]);
         dannie = dannie + buffer[0];
       }
+      // j++;
+      // Serial.print(j);
+      // Serial.print(" :  ");
+      //Serial.println(buffer[0]);
     }
 
     dannie.trim();
+    //Serial.println("");
     Serial.println(dannie);
 
     if (dannie.indexOf("sp") != -1) {
@@ -377,9 +390,7 @@ void inputData() {
       uint8_t sppos = dannie.indexOf("sp") + 2;
       String speedrec = dannie.substring(sppos, sppos + 3);
       int receivedspeed = constrain(speedrec.toInt(), 1, 100);
-      Serial.println("received speed: ");
-      Serial.println(receivedspeed);
-
+      Serial.println("received speed: " + String(receivedspeed));
       recalculation(1, receivedspeed);
     }
 
@@ -389,16 +400,23 @@ void inputData() {
       String Shiftrec = dannie.substring(shpos, shpos + 2);
       //Serial.println(Shiftrec);
       int receivedshift = constrain(Shiftrec.toInt(), 0, 82);
-      Serial.println("received shift: ");
-      Serial.println(receivedshift);
-
+      Serial.println("received shift: " + String(receivedshift));
       recalculation(2, receivedshift);
-
     }
 
-    
+    if (dannie.indexOf("PD") != -1) {
 
-    
+      PrintDataFlag = !PrintDataFlag;
+
+      if (PrintDataFlag == 1) {
+
+        Serial.println("///////////Data:///////////");
+
+      } else {
+
+        Serial.println("/////Stop Data sending/////");
+      }
+    }
     //Serial.println(dannie);
   }
 }
@@ -409,7 +427,7 @@ void recalculation(int opID, float val) {
 
     case 1:
 
-      Freq_MOT = val / MM_na_Shag;                      // Шагов в секунду при данной скорости
+      Freq_MOT = val / MM_na_Shag;                           // Шагов в секунду при данной скорости
       period_MOT = 1000000.0 / Freq_MOT;                     // Микросекунд на шаг при данной скорости
       MOT_ISR_Tact = (period_MOT / ((N + 1) * 0.0625)) / 2;  // Сколько тактов нужно для данной конфигурации таймера 519 мкс для 150 мм/с, значит 51,9 тактов для N = 159
 
@@ -423,5 +441,4 @@ void recalculation(int opID, float val) {
 
       break;
   }
-
 }
